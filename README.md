@@ -39,7 +39,24 @@
 To query a word using the Datamuse API, you can use the following endpoint:
 
 ```sh
-https://api.datamuse.com/words?sp=he?o
+https://api.datamuse.com/words?sp=he??o
+```
+
+### Example Response
+
+The response from the Datamuse API for the query `https://api.datamuse.com/words?sp=he??o` might look like this:
+
+```json
+[
+  {
+    "word": "hello",
+    "score": 4231
+  },
+  {
+    "word": "hero",
+    "score": 3000
+  }
+]
 ```
 
 For more information on the Datamuse API, visit [Datamuse API Documentation](https://www.datamuse.com/api/).
