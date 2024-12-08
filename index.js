@@ -4,6 +4,12 @@ import inquirer from "inquirer";
 import checkerSvc from "./services/checker.service.js";
 import searcherSvc from "./services/searcher.service.js";
 import figlet from "figlet";
+import OpenAI from "openai";
+import { zodResponseFormat } from "openai/helpers/zod";
+import { z } from "zod";
+
+
+let gameModeCache;
 
 (async function main() {
     clear();
@@ -11,105 +17,117 @@ import figlet from "figlet";
         chalk.yellow(figlet.textSync("Wordle", { horizontalLayout: "full" }))
     );
 
-    const gameMode = await getUserChoice();
+    const gameMode = await getUserChoice(gameModeCache);
+    gameModeCache = gameMode;
 
-    const guessWordHandle = getGuessWordHandler(gameMode.mode, gameMode.size, gameMode.word);
-    const searcherHandle = getSearchHandler();
+    const ctx = {
+        guess: "?".repeat(gameMode.size),
+        absentChars: new Set(),
+        presentChars: new Set(),
+        checkedWords: new Set(),
+        gameMode,
+    }
 
-    let guess = "?".repeat(gameMode.size);
-    const absentChars = new Set();
-    const presentChars = new Set();
-    const checkedWords = new Set();
+    const guessWordHandle = getGuessWordHandler(ctx);
+    const searcherHandle = getSearchHandler(ctx);
+    let time = 0;
+    while (ctx.guess.includes("?")) {
+        if (time >= 50) {
+            break;
+        }
+        time++;
+        showCurrentGuess(ctx.guess);
+        const recommendWords = await searcherHandle(ctx.guess);
 
-    while (guess.includes("?")) {
-        const recommendWords = await searcherHandle(guess);
         if (recommendWords.length === 0) {
             console.log(chalk.red("No word found"));
             return
         }
         for (let i = 0; i < recommendWords.length; i++) {
-            if (i > 0) {
-                showCurrentGuess(guess);
-            }
-
-            const currentGuess = guess;
+            const currentGuess = ctx.guess;
             const recommendWord = recommendWords[i];
-            if (checkedWords.has(recommendWord.word)) {
+            if (ctx.checkedWords.has(recommendWord)) {
                 continue;
             }
+            // Add the word to checked words
+            ctx.checkedWords.add(recommendWord);
             // filter word by size
-            if (recommendWord.word.length !== gameMode.size) {
+            if (recommendWord.length !== ctx.gameMode.size) {
                 continue;
             }
 
             // filter word by absent char
-            for (let j = 0; j < recommendWord.word.length; j++) {
-                const char = recommendWord.word[j];
-                if (absentChars.has(char) || presentChars.has(char)) {
+            for (let j = 0; j < recommendWord.length; j++) {
+                const char = recommendWord[j];
+                if (ctx.absentChars.has(char) || ctx.presentChars.has(char)) {
                     continue;
                 }
             }
 
-            const guessRegular = convertToRegular(guess);
+            const guessRegular = convertToRegular(ctx.guess);
             // filter word by regex
-            if (!guessRegular.test(recommendWord.word)) {
+            if (!guessRegular.test(recommendWord)) {
                 continue;
             }
-            // Add the word to checked words
-            checkedWords.add(recommendWord.word);
 
-            const guessWord = recommendWord.word;
+            const guessWord = recommendWord;
 
             showGuess(guessWord)
             const guessResult = await guessWordHandle(guessWord);
             if (guessResult.find((element) => element.result !== "correct")) {
                 showWrongGuess(guessWord)
             } else {
-                guess = guessWord;
+                ctx.guess = guessWord;
                 break;
             }
 
             for (let idx = 0; idx < guessResult.length; idx++) {
                 const char = guessResult[idx];
                 if (char.result === "absent") {
-                    absentChars.add(char.char);
+                    ctx.absentChars.add(char.guess);
                     continue;
                 }
 
                 // if char is present, replace the guess word to find the position of the char
                 if (char.result === "present") {
-                    const guessWord = guess.replaceAll("?", char.guess);
+                    const guessWord = ctx.guess.replaceAll("?", char.guess);
                     showSpamGuess(guessWord)
                     const spamGuessResult = await guessWordHandle(guessWord);
 
                     spamGuessResult.forEach((element) => {
                         if (element.result === "correct") {
-                            guess = replaceAt(guess, element.slot, element.guess);
+                            ctx.guess = replaceAt(ctx.guess, element.slot, element.guess);
                         }
                     });
-                    presentChars.add(char.char);
+                    ctx.presentChars.add(char.guess);
                     continue;
                 }
 
                 if (char.result === "correct") {
-                    guess = replaceAt(guess, char.slot, char.guess);
-                    presentChars.add(char.char);
+                    ctx.guess = replaceAt(ctx.guess, char.slot, char.guess);
+                    ctx.presentChars.add(char.guess);
                     continue;
                 }
             }
 
-            if (currentGuess !== guess) {
+            if (currentGuess !== ctx.guess && !ctx.gameMode.useGPT) {
                 break;
             }
         }
 
-        if (guess === "?".repeat(gameMode.size)) {
-            console.log(chalk.red("No word found"));
+        if (ctx.guess === "?".repeat(ctx.gameMode.size)) {
             return
         }
     }
 
-    showRightGuess(guess);
+    if (ctx.guess.includes("?")) {
+        console.log(chalk.red(
+            figlet.textSync("Program can't find the word", { horizontalLayout: "full" })
+        ));
+    } else {
+        showRightGuess(ctx.guess);
+    }
+
     if (await questionMore()) {
         main();
     }
@@ -152,49 +170,56 @@ const showRightGuess = (guess) => {
     );
 }
 
-function getGuessWordHandler(mode = "random", size = 5, word = "") {
+function getGuessWordHandler(ctx) {
     const seed = getRandomInt(1, 10);
 
-    if (mode === "random") {
+    if (ctx.gameMode.mode === "random") {
         return (guess) => {
             return checkerSvc
-                .guessRandom({ guess, size, seed })
-                .then(([res]) => {
+                .guessRandom({
+                    guess,
+                    seed,
+                    size: ctx.gameMode.size,
+                }).then(([res]) => {
                     ;
                     return res ?? []
                 })
         };
     }
-    if (mode === "daily") {
+    if (ctx.gameMode.mode === "daily") {
         return (guess) => {
             return checkerSvc
-                .guessDaily({ guess, size })
+                .guessDaily({ guess, size: ctx.gameMode.size })
                 .then(([res]) => {
                     return res ?? []
                 })
         };
     }
-    if (word === "") {
+    if (ctx.gameMode.word === "") {
         throw new Error("Word must be provided when mode is word");
     }
     return (guess) => {
         return checkerSvc
-            .guessWord(word, guess)
+            .guessWord(ctx.gameMode.word, guess)
             .then(([res]) => {
                 console.log(res);
-                
+
                 return res ?? []
             })
     }
 }
 
-function getSearchHandler() {
+function getSearchHandler(ctx) {
     const max = 100;
-    return (word) => searcherSvc.search(word, max).then(([res]) => res ?? []);
+    if (ctx.gameMode.useGPT) {
+        const handleSearch = gptSearchSvc(ctx)
+        return (word) => handleSearch(word);
+    }
+    return (word) => searcherSvc.search(word, max).then(([res]) => res ?? []).then((res) => res.map((element) => element.word));
 }
 
-async function getUserChoice() {
-    const defaultSize = 5;
+async function getUserChoice(gameMode = {}) {
+    const defaultSize = gameMode.size ?? 5;
     let size = defaultSize;
     let word = "";
     let questions = [
@@ -203,7 +228,7 @@ async function getUserChoice() {
             name: "mode",
             message: "Choice a game mode to play:",
             choices: ["daily", "random", "word"],
-            default: "daily",
+            default: gameMode.mode ?? "daily",
         },
     ];
     const { mode } = await inquirer.prompt(questions);
@@ -214,6 +239,7 @@ async function getUserChoice() {
                 type: "input",
                 name: "word",
                 message: "Enter the word to guess",
+                default: gameMode.word ?? "",
             },
         ];
         const result = await inquirer.prompt(questions);
@@ -234,7 +260,7 @@ async function getUserChoice() {
                 type: "input",
                 name: "size",
                 message: "Enter the size of the word",
-                default: 5,
+                default: defaultSize,
             },
         ];
         const result = await inquirer.prompt(questions);
@@ -248,7 +274,34 @@ async function getUserChoice() {
         size = Number(result.size);
     }
 
-    return { mode, size, word };
+    questions = [
+        {
+            type: "confirm",
+            name: "useGPT",
+            message: "Do you want use openAI of GPT ?",
+            default: gameMode.useGPT ?? false,
+        },
+    ];
+    const { useGPT } = await inquirer.prompt(questions);
+    let openaiKey = "";
+    if (useGPT) {
+        questions = [
+            {
+                type: "input",
+                name: "openaiKey",
+                message: "Enter the openAI key",
+                default: gameMode.openaiKey ?? "",
+            },
+        ];
+        const result = await inquirer.prompt(questions);
+        if (result.openaiKey === "") {
+            console.log(chalk.red("OpenAI key must be provided"));
+            throw new Error();
+        }
+        openaiKey = result.openaiKey
+    }
+
+    return { mode, size, word, useGPT, openaiKey };
 }
 
 async function questionMore() {
@@ -262,4 +315,42 @@ async function questionMore() {
     ];
     const { more } = await inquirer.prompt(questions);
     return more;
+}
+
+// Setup OpenAI
+const CalendarEvent = z.object({
+    name: z.string(),
+    items: z.array(z.string()),
+});
+let openai;
+const gptSearchSvc = (ctx) => {
+    if (!ctx.gameMode.openaiKey) {
+        throw new Error("OpenAI key must be provided");
+    }
+
+    openai = new OpenAI({ apiKey: ctx.gameMode.openaiKey });
+
+    return async function gptSearch(guess) {
+        const excludeCharacters = [...Array.from(ctx.absentChars), ...Array.from(ctx.presentChars)];
+        let checkedWords = Array.from(ctx.checkedWords);
+        checkedWords = checkedWords.length > 10 ? checkedWords.slice(checkedWords.length - 6, checkedWords.length - 1) : checkedWords;
+        const content = `word is ${guess} fill each '?' a letters to complete this word, word have ${guess.length} letters, ${excludeCharacters.length > 0 ? `exclude letters ${excludeCharacters.toString()},` : ''} ${checkedWords.length > 0 ? `exclude word ${checkedWords.toString()},` : ''}`;
+
+        const completion = await openai.chat.completions.create({
+            model: "gpt-4o-mini-2024-07-18",
+
+            messages: [
+                { role: "system", content: `You extract word into JSON data like a array ["word1", "word2"] with max element are 100` },
+                {
+                    role: "user",
+                    content,
+                },
+            ],
+            response_format: zodResponseFormat(CalendarEvent, "event")
+        });
+
+        const response = JSON.parse(completion.choices[0].message.content).items.map((element) => element.toLowerCase());
+        console.log('GPT search:', response);
+        return response;
+    }
 }
