@@ -31,7 +31,7 @@
 7. Choose have using GPT to play.
 ![alt text](image-3.png)
 
-8. If using GPT to play Enter openAI key
+8. If using GPT to play Enter openAI key (It only using in the session of the game play and will not send to any where)
 ![alt text](image-4.png)
 
 9. The Programming will auto play the game.
