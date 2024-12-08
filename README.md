@@ -28,7 +28,13 @@
 
 ![alt text](image-1.png)
 
-7. The Programming will auto play the game.
+7. Choose have using GPT to play.
+![alt text](image-3.png)
+
+8. If using GPT to play Enter openAI key
+![alt text](image-4.png)
+
+9. The Programming will auto play the game.
 
 ![alt text](image-2.png)
 
